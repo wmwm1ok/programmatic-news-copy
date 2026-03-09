@@ -104,33 +104,7 @@ class HybridCompetitorFetcher:
         if stealth:
             for key, name in still_missing:
                 try:
-                    items = []
-                    if key == "Criteo":
-                        items = stealth.fetch_criteo(window_start, window_end)
-                    elif key == "Teads":
-                        items = stealth.fetch_teads(window_start, window_end)
-                    elif key == "AppLovin":
-                        items = stealth.fetch_applovin(window_start, window_end)
-                    elif key == "Unity":
-                        items = stealth.fetch_unity(window_start, window_end)
-                    elif key == "Zeta Global":
-                        items = stealth.fetch_zeta(window_start, window_end)
-                    elif key == "Moloco":
-                        items = stealth.fetch_moloco(window_start, window_end)
-                    elif key == "Magnite":
-                        items = stealth.fetch_magnite(window_start, window_end)
-                    elif key == "PubMatic":
-                        items = stealth.fetch_pubmatic(window_start, window_end)
-                    elif key == "Taboola":
-                        items = stealth.fetch_taboola(window_start, window_end)
-                    elif key == "mobvista":
-                        items = stealth.fetch_mobvista(window_start, window_end)
-                    elif key == "BIGO Ads":
-                        items = stealth.fetch_bigo_ads(window_start, window_end)
-                    elif key == "Unity":
-                        items = stealth.fetch_unity(window_start, window_end)
-                    else:
-                        items = stealth.fetch_generic(key, window_start, window_end)
+                    items = stealth.fetch_company(key, window_start, window_end)
                     
                     if items:
                         results[name] = items

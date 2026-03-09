@@ -19,7 +19,7 @@ print(f"时间窗口: {window_start.date()} ~ {window_end.date()}")
 print("="*70)
 
 stealth = StealthFetcher()
-items = stealth.fetch_ttd(window_start, window_end)
+items = stealth.fetch_company("TTD", window_start, window_end)
 stealth.close()
 
 # 限制最多3条

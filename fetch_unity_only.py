@@ -19,7 +19,7 @@ print(f"时间窗口: {window_start.date()} ~ {window_end.date()}")
 print("="*70)
 
 stealth = StealthFetcher()
-items = stealth.fetch_unity(window_start, window_end)
+items = stealth.fetch_company("Unity", window_start, window_end)
 stealth.close()
 
 # 保存结果

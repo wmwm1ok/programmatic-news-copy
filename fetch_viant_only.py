@@ -19,7 +19,7 @@ print(f"时间窗口: {window_start.date()} ~ {window_end.date()}")
 print("="*70)
 
 stealth = StealthFetcher()
-items = stealth.fetch_viant(window_start, window_end)
+items = stealth.fetch_company("Viant Technology", window_start, window_end)
 stealth.close()
 
 # 保存结果

@@ -2,12 +2,14 @@
 """
 Stealth Playwright 抓取器 - 模拟真人浏览器绕过反爬虫检测
 """
+import json
 import re
+import subprocess
 import time
 import random
 from datetime import datetime
 from typing import List, Dict, Optional
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 from bs4 import BeautifulSoup
 
@@ -160,6 +162,372 @@ class StealthFetcher:
             if elem:
                 return self.clean_text(elem.get_text(separator=' ', strip=True))
         return ""
+
+    def _fetch_html_with_fallback(self, url: str, timeout: int = 30, referer: str = None) -> str:
+        """优先使用 requests，失败时退回 curl。"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        if referer:
+            headers["Referer"] = referer
+
+        try:
+            import requests
+
+            response = requests.get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            html = response.text
+            if html and "Access Denied" not in html:
+                return html
+        except Exception:
+            pass
+
+        try:
+            cmd = ["curl", "-L", "--http1.1", "--max-time", str(timeout)]
+            for key, value in headers.items():
+                cmd.extend(["-H", f"{key}: {value}"])
+            cmd.append(url)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout
+        except Exception:
+            return ""
+
+    def _fetch_json_with_fallback(self, url: str, headers: dict = None, timeout: int = 30) -> dict:
+        """优先使用 requests 获取 JSON，失败时退回 curl。"""
+        request_headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+        if headers:
+            request_headers.update(headers)
+
+        try:
+            import requests
+
+            response = requests.get(url, headers=request_headers, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except Exception:
+            pass
+
+        try:
+            cmd = ["curl", "-L", "--http1.1", "--max-time", str(timeout)]
+            for key, value in request_headers.items():
+                cmd.extend(["-H", f"{key}: {value}"])
+            cmd.append(url)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return json.loads(result.stdout)
+        except Exception:
+            return {}
+
+    def _build_content_item(self, title: str, summary: str, date_str: str, url: str, source: str) -> ContentItem:
+        return ContentItem(
+            title=self.clean_text(title),
+            summary=self.clean_text(summary)[:600] if summary else self.clean_text(title),
+            date=date_str,
+            url=url,
+            source=source,
+        )
+
+    def _extract_unity_sanity_config(self) -> Dict[str, str]:
+        """从 Unity 官方 news 页面提取 Sanity 配置。"""
+        config = {
+            "project_id": "fuvbjjlp",
+            "dataset": "production",
+            "token": "",
+            "api_version": "2023-10-12",
+        }
+
+        html = self._fetch_html_with_fallback("https://unity.com/news", timeout=30)
+        if not html:
+            return config
+
+        chunk_match = re.search(
+            r'(/_next/static/chunks/app/%5Blocale%5D/news/page-[^"\\]+\.js)',
+            html,
+        )
+        if not chunk_match:
+            return config
+
+        chunk_url = urljoin("https://unity.com", chunk_match.group(1))
+        chunk_js = self._fetch_html_with_fallback(chunk_url, timeout=30, referer="https://unity.com/news")
+        if not chunk_js:
+            return config
+
+        project_match = re.search(r'SANITY_STUDIO_PROJECT_ID\|\|"([^"]+)"', chunk_js)
+        dataset_match = re.search(r'SANITY_STUDIO_DATASET\|\|"([^"]+)"', chunk_js)
+        token_match = re.search(r'SANITY_STUDIO_TOKEN\|\|"([^"]+)"', chunk_js)
+
+        if project_match:
+            config["project_id"] = project_match.group(1)
+        if dataset_match:
+            config["dataset"] = dataset_match.group(1)
+        if token_match:
+            config["token"] = token_match.group(1)
+
+        return config
+
+    def _extract_unity_summary(self, blocks: list) -> str:
+        parts = []
+        for block in blocks or []:
+            if block.get("_type") != "article":
+                continue
+            for body in block.get("body") or []:
+                texts = [child.get("text", "") for child in body.get("children") or [] if child.get("text")]
+                if texts:
+                    parts.append("".join(texts))
+        return self.clean_text(" ".join(parts))
+
+    def _fetch_unity_official(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
+        """使用 Unity 官方 news 页面背后的官方 Sanity 数据源。"""
+        print("    先尝试 Unity 官网渠道...")
+        config = self._extract_unity_sanity_config()
+        if not config["project_id"] or not config["dataset"]:
+            print("    - 未能提取 Unity 官网数据配置")
+            return []
+
+        query = (
+            '{"companyNews": *[_type == "newsPage" && !(_id in path("drafts.**")) '
+            f'&& date >= "{window_start.strftime("%Y-%m-%d")}" '
+            f'&& date <= "{window_end.strftime("%Y-%m-%d")}"] '
+            '| order(date desc, _updatedAt desc) {'
+            'date, title, pageUrl { link-> }, '
+            '"blocks": blocks[] { _type, _type == "article" => { body[] { children[] { text } } } }'
+            '}}'
+        )
+        url = (
+            f'https://{config["project_id"]}.apicdn.sanity.io/'
+            f'v{config["api_version"]}/data/query/{config["dataset"]}?query={quote(query)}'
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+        if config["token"]:
+            headers["Authorization"] = f'Bearer {config["token"]}'
+
+        payload = self._fetch_json_with_fallback(url, headers=headers, timeout=30)
+        if not payload:
+            print("    - Unity 官网接口请求失败")
+            return []
+
+        items = []
+        for entry in payload.get("result", {}).get("companyNews", []):
+            date_str = entry.get("date", "")
+            if not self.is_in_date_window(date_str, window_start, window_end):
+                continue
+
+            link_data = ((entry.get("pageUrl") or {}).get("link") or {})
+            href = ((link_data.get("href") or {}).get("current")) or ""
+            detail_url = urljoin("https://unity.com", href) if href else "https://unity.com/news"
+            summary = self._extract_unity_summary(entry.get("blocks"))
+            items.append(
+                self._build_content_item(
+                    entry.get("title") or "Unity News",
+                    summary or entry.get("title") or "Unity News",
+                    date_str,
+                    detail_url,
+                    "Unity",
+                )
+            )
+
+        print(f"    Unity 官网: {len(items)} 条")
+        return items
+
+    def _fetch_viant_official(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
+        """使用 Viant 官网 press releases AJAX。"""
+        print("    先尝试 Viant 官网渠道...")
+        ajax_url = "https://www.viantinc.com/wp-admin/admin-ajax.php"
+        form_data = {
+            "category": "",
+            "paged": 1,
+            "post_per_page": 20,
+            "order": "DESC",
+            "order_by": "date",
+            "action": "filter_press_release",
+        }
+
+        try:
+            import requests
+
+            response = requests.post(
+                ajax_url,
+                data=form_data,
+                timeout=30,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://www.viantinc.com/company/news/press-releases/",
+                },
+            )
+            response.raise_for_status()
+            html = response.text
+        except Exception as e:
+            print(f"    - Viant 官网接口请求失败: {e}")
+            return []
+
+        soup = BeautifulSoup(html, "html.parser")
+        items = []
+        for post in soup.select(".PressRelease-post"):
+            link = post.select_one(".PressRelease-post--title")
+            date_elem = post.select_one(".PressRelease-post--date")
+            excerpt_elem = post.select_one(".PressRelease-post--excerpt")
+            if not link or not date_elem:
+                continue
+
+            date_str = self.parse_date(date_elem.get_text(" ", strip=True)) or ""
+            if not self.is_in_date_window(date_str, window_start, window_end):
+                continue
+
+            items.append(
+                self._build_content_item(
+                    link.get_text(" ", strip=True),
+                    excerpt_elem.get_text(" ", strip=True) if excerpt_elem else link.get_text(" ", strip=True),
+                    date_str,
+                    link.get("href", ""),
+                    "Viant Technology",
+                )
+            )
+
+        print(f"    Viant 官网: {len(items)} 条")
+        return items
+
+    def _fetch_pubmatic_official(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
+        """使用 PubMatic 官方 IR 新闻列表。"""
+        print("    先尝试 PubMatic 官网渠道...")
+        base_url = "https://investors.pubmatic.com/news-events/news-releases/"
+        html = self._fetch_html_with_fallback(base_url, timeout=60)
+        if not html:
+            print("    - PubMatic 官网列表获取失败")
+            return []
+
+        soup = BeautifulSoup(html, "html.parser")
+        items = []
+        for article in soup.select("article"):
+            link = article.select_one('a[href*="news-release-details"]')
+            if not link:
+                continue
+
+            text = self.clean_text(article.get_text(" ", strip=True))
+            date_match = re.search(r"([A-Za-z]+\s+\d{1,2},\s+\d{4})", text)
+            date_str = self.parse_date(date_match.group(1)) if date_match else ""
+            if not self.is_in_date_window(date_str, window_start, window_end):
+                continue
+
+            detail_url = urljoin(base_url, link.get("href", ""))
+            detail_html = self._fetch_html_with_fallback(detail_url, timeout=60, referer=base_url)
+            summary = ""
+            if detail_html:
+                detail_soup = BeautifulSoup(detail_html, "html.parser")
+                article_elem = detail_soup.select_one("article") or detail_soup.select_one("main")
+                if article_elem:
+                    summary = self.clean_text(article_elem.get_text(" ", strip=True))
+
+            items.append(
+                self._build_content_item(
+                    link.get_text(" ", strip=True),
+                    summary or text,
+                    date_str,
+                    detail_url,
+                    "PubMatic",
+                )
+            )
+
+        print(f"    PubMatic 官网: {len(items)} 条")
+        return items
+
+    def _fetch_company_third_party(self, company_key: str, window_start: datetime, window_end: datetime) -> List[ContentItem]:
+        """官网 7 日内为空时，使用第三方补 2 条。"""
+        source_name = COMPETITOR_SOURCES[company_key]["name"]
+        query_map = {
+            "TTD": '"The Trade Desk" press release advertising',
+            "Criteo": 'Criteo press release',
+            "Taboola": 'Taboola press release',
+            "Teads": 'Teads press release',
+            "AppLovin": 'AppLovin advertising press release',
+            "mobvista": 'Mobvista press release',
+            "Moloco": 'Moloco press release',
+            "BIGO Ads": '"BIGO Ads" press release',
+            "Unity": 'Unity Technologies advertising monetization',
+            "Viant Technology": '"Viant Technology" press release',
+            "Zeta Global": '"Zeta Global" press release',
+            "PubMatic": 'PubMatic press release',
+            "Magnite": 'Magnite press release',
+        }
+        query = query_map.get(company_key, f'"{source_name}" press release')
+        items = self._fetch_google_news_rss(query, window_start, window_end, source_name)
+
+        if company_key == "Unity":
+            filtered = []
+            for item in items:
+                title_lower = item.title.lower()
+                if ('unity' in title_lower or 'nyse:u' in title_lower or 'nyse: u' in title_lower) and 'applovin' not in title_lower and 'roblox' not in title_lower:
+                    filtered.append(item)
+            items = filtered
+        else:
+            keywords_map = {
+                "TTD": ["trade desk", "ttd"],
+                "Criteo": ["criteo"],
+                "Taboola": ["taboola"],
+                "Teads": ["teads"],
+                "AppLovin": ["applovin"],
+                "mobvista": ["mobvista", "mintegral"],
+                "Moloco": ["moloco"],
+                "BIGO Ads": ["bigo"],
+                "Viant Technology": ["viant"],
+                "Zeta Global": ["zeta"],
+                "PubMatic": ["pubmatic"],
+                "Magnite": ["magnite"],
+            }
+            company_keywords = keywords_map.get(company_key, [source_name.lower()])
+            filtered = []
+            for item in items:
+                title_lower = item.title.lower()
+                if any(keyword in title_lower for keyword in company_keywords) and not self._is_not_main_subject(item.title, source_name):
+                    filtered.append(item)
+            items = filtered
+
+        return items[:2]
+
+    def fetch_company(self, company_key: str, window_start: datetime, window_end: datetime) -> List[ContentItem]:
+        """统一竞品抓取入口：官网优先，官网为空才补第三方 2 条。"""
+        official_fetchers = {
+            "TTD": self.fetch_ttd,
+            "Criteo": self.fetch_criteo,
+            "Taboola": self.fetch_taboola,
+            "Teads": self.fetch_teads,
+            "AppLovin": self.fetch_applovin,
+            "mobvista": self.fetch_mobvista,
+            "Moloco": self.fetch_moloco,
+            "BIGO Ads": self.fetch_bigo_ads,
+            "Unity": self._fetch_unity_official,
+            "Viant Technology": self._fetch_viant_official,
+            "Zeta Global": self.fetch_zeta,
+            "PubMatic": self._fetch_pubmatic_official,
+            "Magnite": self.fetch_magnite,
+        }
+
+        fetcher = official_fetchers.get(company_key)
+        if not fetcher:
+            return self.fetch_generic(company_key, window_start, window_end)
+
+        official_items = fetcher(window_start, window_end)
+        if official_items:
+            return official_items
+
+        print("    官网 7 日内无内容，使用第三方补 2 条")
+        return self._fetch_company_third_party(company_key, window_start, window_end)
     
     def fetch_criteo(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
         """抓取 Criteo - 使用官网新闻列表"""
@@ -526,10 +894,13 @@ class StealthFetcher:
         return is_ad and not is_excluded
 
     def fetch_unity(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
-        """抓取 Unity - 官网有反爬，使用 Google News RSS"""
+        """抓取 Unity - 官网优先，官网为空时再使用第三方补 2 条。"""
         print("  [Stealth] 抓取 Unity...")
-        print("    注意: 原网站有访问限制，使用 Google News RSS")
-        
+        official_items = self._fetch_unity_official(window_start, window_end)
+        if official_items:
+            return official_items
+
+        print("    官网 7 日内无内容，使用 Google News RSS 补 2 条")
         items = self._fetch_google_news_rss(
             "Unity Technologies advertising monetization", 
             window_start, 
@@ -549,7 +920,6 @@ class StealthFetcher:
         
         items = filtered_items
         
-        # 限制最多2条
         items = items[:2]
         
         print(f"    找到 {len(items)} 条在时间窗口内")
@@ -1053,10 +1423,13 @@ class StealthFetcher:
         return items
     
     def fetch_viant(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
-        """抓取 Viant - 官网受限，使用 Google News RSS 作为备选"""
+        """抓取 Viant - 官网优先，官网为空时再使用第三方补 2 条。"""
         print("  [Stealth] 抓取 Viant Technology...")
-        print("    注意: 原网站有访问限制，使用 Google News RSS")
-        
+        official_items = self._fetch_viant_official(window_start, window_end)
+        if official_items:
+            return official_items
+
+        print("    官网 7 日内无内容，使用 Google News RSS 补 2 条")
         items = self._fetch_google_news_rss(
             "Viant Technology news press release", 
             window_start, 
@@ -1064,8 +1437,7 @@ class StealthFetcher:
             "Viant Technology"
         )
         
-        # 限制最多3条
-        items = items[:3]
+        items = items[:2]
         
         print(f"    找到 {len(items)} 条在时间窗口内")
         for item in items[:5]:
@@ -1268,10 +1640,13 @@ class StealthFetcher:
         return items
 
     def fetch_pubmatic(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
-        """抓取 PubMatic - 官网受限，使用 Google News RSS 作为备选"""
+        """抓取 PubMatic - 官网优先，官网为空时再使用第三方补 2 条。"""
         print("  [Stealth] 抓取 PubMatic...")
-        print("    注意: 原网站有访问限制，使用 Google News RSS")
-        
+        official_items = self._fetch_pubmatic_official(window_start, window_end)
+        if official_items:
+            return official_items
+
+        print("    官网 7 日内无内容，使用 Google News RSS 补 2 条")
         items = self._fetch_google_news_rss(
             "PubMatic news press release", 
             window_start, 
@@ -1279,8 +1654,7 @@ class StealthFetcher:
             "PubMatic"
         )
         
-        # 限制最多3条
-        items = items[:3]
+        items = items[:2]
         
         print(f"    找到 {len(items)} 条在时间窗口内")
         for item in items[:5]:
