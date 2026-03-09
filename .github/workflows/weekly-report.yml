@@ -1,12 +1,7 @@
 name: Weekly Report Automation
 
 on:
-  # 定时触发：北京时间每周一早上 8:00
-  # UTC 周一 00:00 = 北京时间周一 08:00 (UTC+8)
-  schedule:
-    - cron: '0 0 * * 1'
-  
-  # 手动触发
+  # 仅保留手动触发。定时任务统一由并行版 workflow 负责。
   workflow_dispatch:
 
 env:
