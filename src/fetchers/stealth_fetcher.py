@@ -9,7 +9,7 @@ import time
 import random
 from datetime import datetime
 from typing import List, Dict, Optional
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -277,6 +277,165 @@ class StealthFetcher:
         url_key = (item.url or "").split("?", 1)[0].lower()
         return (title_key, url_key)
 
+    def _split_google_news_title(self, title: str) -> tuple:
+        """拆分 Google News 标题中的正文标题和发布方。"""
+        clean_title = self.clean_text(title)
+        if " - " not in clean_title:
+            return clean_title, ""
+
+        article_title, publisher = clean_title.rsplit(" - ", 1)
+        publisher = publisher.strip()
+        if not publisher or len(publisher) > 80:
+            return clean_title, ""
+        return article_title.strip(), publisher
+
+    def _normalize_domain(self, url: str) -> str:
+        if not url:
+            return ""
+        netloc = urlparse(url).netloc.lower()
+        return netloc[4:] if netloc.startswith("www.") else netloc
+
+    def _official_domains_for_company(self, company_key: str) -> set:
+        domains = set()
+        source = COMPETITOR_SOURCES.get(company_key, {})
+        if source.get("url"):
+            domains.add(self._normalize_domain(source["url"]))
+
+        extra_domains = {
+            "Unity": {"unity.com"},
+            "Viant Technology": {"viantinc.com"},
+            "PubMatic": {"investors.pubmatic.com", "pubmatic.com"},
+            "Magnite": {"investor.magnite.com", "magnite.com"},
+            "AppLovin": {"investors.applovin.com", "applovin.com"},
+            "Zeta Global": {"investors.zetaglobal.com", "zetaglobal.com"},
+        }
+        domains.update(extra_domains.get(company_key, set()))
+        return {domain for domain in domains if domain}
+
+    def _is_official_company_url(self, company_key: str, url: str) -> bool:
+        url_domain = self._normalize_domain(url)
+        if not url_domain:
+            return False
+        for official_domain in self._official_domains_for_company(company_key):
+            if url_domain == official_domain or url_domain.endswith(f".{official_domain}"):
+                return True
+        return False
+
+    def _contains_company_signal(self, company_key: str, text: str) -> bool:
+        text_lower = (text or "").lower()
+        if not text_lower:
+            return False
+
+        patterns = {
+            "TTD": [r"\bthe trade desk\b", r"\bttd\b"],
+            "Criteo": [r"\bcriteo\b"],
+            "Taboola": [r"\btaboola\b"],
+            "Teads": [r"\bteads\b"],
+            "AppLovin": [r"\bapplovin\b"],
+            "mobvista": [r"\bmobvista\b", r"\bmintegral\b"],
+            "Moloco": [r"\bmoloco\b"],
+            "BIGO Ads": [r"\bbigo ads\b", r"\bbigo\b"],
+            "Unity": [r"\bunity\b", r"\bunity ads\b", r"\bunity software\b", r"\bironsource\b", r"\blevelplay\b", r"\bsupersonic\b", r"\bunity vector\b"],
+            "Viant Technology": [r"\bviant technology\b", r"\bviant\b"],
+            "Zeta Global": [r"\bzeta global\b", r"\bzeta\b"],
+            "PubMatic": [r"\bpubmatic\b"],
+            "Magnite": [r"\bmagnite\b"],
+        }
+        return any(re.search(pattern, text_lower) for pattern in patterns.get(company_key, [rf"\b{re.escape(company_key.lower())}\b"]))
+
+    def _is_stock_or_market_news(self, title: str, publisher: str = "", url: str = "") -> bool:
+        haystack = " ".join(filter(None, [title, publisher, url])).lower()
+        stock_keywords = [
+            "stock", "stocks", "share price", "shares", "stake", "position in", "holdings",
+            "analyst", "analysts", "price target", "downgrade", "upgrade", "buy rating",
+            "sell rating", "consensus", "market cap", "valuation", "hedge fund", "etf",
+            "portfolio", "13f", "sec filing", "insider trading", "short interest",
+            "nasdaq", "nyse", "earnings call preview", "investor sentiment",
+        ]
+        finance_publishers = [
+            "benzinga", "marketbeat", "seeking alpha", "zacks", "nasdaq",
+            "yahoo finance", "the motley fool", "insidermonkey", "etfdailynews",
+            "defense world", "ticker report", "investing.com", "tradingview",
+            "simply wall st", "wallstreetzen", "stock titan",
+        ]
+        return any(keyword in haystack for keyword in stock_keywords + finance_publishers)
+
+    def _is_adtech_relevant_third_party_title(self, company_key: str, title: str) -> bool:
+        title_lower = (title or "").lower()
+        if not title_lower:
+            return False
+
+        positive_keywords = [
+            "advertising", "advertiser", "advertisers", "ad tech", "adtech", "programmatic",
+            "monetization", "monetisation", "dsp", "ssp", "retail media", "commerce media",
+            "connected tv", "ctv", "video", "streaming", "measurement", "attribution",
+            "publisher", "publishers", "marketer", "marketers", "campaign", "media buying",
+            "native ads", "contextual", "audience", "creative", "performance", "sdk",
+            "partnership", "partner", "partners", "launches", "launched", "unveils",
+            "introduces", "announces", "reported", "reports", "results", "revenue",
+            "guidance", "appoints", "named", "expands", "acquires", "acquisition",
+            "merger", "integration", "integrates", "ai", "agentic", "measurement",
+        ]
+        if any(keyword in title_lower for keyword in positive_keywords):
+            return True
+
+        company_specific = {
+            "Unity": ["ironsource", "levelplay", "unity ads", "unity vector", "mediation", "bidding"],
+            "Taboola": ["native advertising", "recommendation", "performance advertising"],
+            "Teads": ["connected tv", "creative", "branding"],
+            "Moloco": ["retail media", "commerce media", "machine learning"],
+            "BIGO Ads": ["user acquisition", "mobile marketing"],
+        }
+        return any(keyword in title_lower for keyword in company_specific.get(company_key, []))
+
+    def _is_clearly_off_topic_for_company(self, company_key: str, title: str, publisher: str = "") -> bool:
+        haystack = " ".join(filter(None, [title, publisher])).lower()
+        generic_off_topic = [
+            "readership spike", "viral", "celebrity", "movie", "album", "football",
+            "basketball", "soccer", "cricket", "weather", "lottery",
+        ]
+        if any(keyword in haystack for keyword in generic_off_topic):
+            return True
+
+        if company_key == "Unity":
+            unity_off_topic = [
+                "umno", "pas", "mca", "malaysia", "political", "politics", "government",
+                "minister", "parliament", "election", "opposition", "coalition", "free advertising",
+                "national unity", "unity government", "church", "school", "festival",
+            ]
+            return any(keyword in haystack for keyword in unity_off_topic)
+
+        return False
+
+    def _is_valid_third_party_item(self, company_key: str, item: ContentItem) -> bool:
+        clean_title, publisher = self._split_google_news_title(item.title)
+        item.title = clean_title
+        if item.summary == item.title or item.summary == clean_title:
+            item.summary = clean_title
+
+        if not self._contains_company_signal(company_key, clean_title):
+            return False
+        if self._is_not_main_subject(clean_title, company_key):
+            return False
+        if self._is_stock_or_market_news(clean_title, publisher, item.url):
+            return False
+        if self._is_clearly_off_topic_for_company(company_key, clean_title, publisher):
+            return False
+        if not self._is_adtech_relevant_third_party_title(company_key, clean_title):
+            return False
+        return True
+
+    def sanitize_company_items(self, company_key: str, items: List[ContentItem], limit: int = 2) -> List[ContentItem]:
+        """最终出口过滤：官网内容直接保留，第三方内容执行更严格筛选。"""
+        filtered = []
+        for item in items:
+            if self._is_official_company_url(company_key, item.url):
+                filtered.append(item)
+                continue
+            if self._is_valid_third_party_item(company_key, item):
+                filtered.append(item)
+        return self._sort_and_limit_items(filtered, limit=limit)
+
     def _extract_unity_sanity_config(self) -> Dict[str, str]:
         """从 Unity 官方 news 页面提取 Sanity 配置。"""
         config = {
@@ -519,36 +678,7 @@ class StealthFetcher:
             if len(collected) >= needed_count:
                 break
             items = self._fetch_google_news_rss(query, window_start, window_end, source_name)
-
-            if company_key == "Unity":
-                filtered = []
-                for item in items:
-                    title_lower = item.title.lower()
-                    if ('unity' in title_lower or 'nyse:u' in title_lower or 'nyse: u' in title_lower) and 'applovin' not in title_lower and 'roblox' not in title_lower:
-                        filtered.append(item)
-                items = filtered
-            else:
-                keywords_map = {
-                    "TTD": ["trade desk", "ttd"],
-                    "Criteo": ["criteo"],
-                    "Taboola": ["taboola"],
-                    "Teads": ["teads"],
-                    "AppLovin": ["applovin"],
-                    "mobvista": ["mobvista", "mintegral"],
-                    "Moloco": ["moloco"],
-                    "BIGO Ads": ["bigo"],
-                    "Viant Technology": ["viant"],
-                    "Zeta Global": ["zeta"],
-                    "PubMatic": ["pubmatic"],
-                    "Magnite": ["magnite"],
-                }
-                company_keywords = keywords_map.get(company_key, [source_name.lower()])
-                filtered = []
-                for item in items:
-                    title_lower = item.title.lower()
-                    if any(keyword in title_lower for keyword in company_keywords) and not self._is_not_main_subject(item.title, source_name):
-                        filtered.append(item)
-                items = filtered
+            items = [item for item in items if self._is_valid_third_party_item(company_key, item)]
 
             filtered_new_items = [
                 item for item in items
@@ -580,7 +710,11 @@ class StealthFetcher:
         if not fetcher:
             return self._sort_and_limit_items(self.fetch_generic(company_key, window_start, window_end), limit=2)
 
-        official_items = self._sort_and_limit_items(fetcher(window_start, window_end), limit=2)
+        official_items = self.sanitize_company_items(
+            company_key,
+            fetcher(window_start, window_end),
+            limit=2,
+        )
         if len(official_items) >= 2:
             return official_items
 
@@ -596,7 +730,11 @@ class StealthFetcher:
             existing_items=official_items,
             needed_count=2 - len(official_items),
         )
-        return self._merge_unique_items(official_items, third_party_items, limit=2)
+        return self.sanitize_company_items(
+            company_key,
+            self._merge_unique_items(official_items, third_party_items, limit=2),
+            limit=2,
+        )
     
     def fetch_criteo(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
         """抓取 Criteo - 使用官网新闻列表"""
@@ -1682,10 +1820,11 @@ class StealthFetcher:
                         continue
                     
                     # 尝试获取详情内容（使用 Google News 摘要作为内容）
-                    content = title  # 使用标题作为内容摘要
+                    clean_title, _ = self._split_google_news_title(title)
+                    content = clean_title or title
                     
                     items.append(ContentItem(
-                        title=self.clean_text(title),
+                        title=clean_title or self.clean_text(title),
                         summary=content[:600],
                         date=date_str,
                         url=link,

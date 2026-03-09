@@ -46,33 +46,38 @@ def load_company_results():
     """加载各公司抓取的结果"""
     artifacts_dir = Path('artifacts')
     results = {}
+    sanitizer = StealthFetcher()
     
-    if not artifacts_dir.exists():
-        print("⚠️ No artifacts directory found")
+    try:
+        if not artifacts_dir.exists():
+            print("⚠️ No artifacts directory found")
+            return results
+
+        # 查找所有 JSON 文件（包括子目录）
+        json_files = list(artifacts_dir.glob('**/*_result.json'))
+        print(f"  找到 {len(json_files)} 个结果文件")
+        
+        for json_file in json_files:
+            # 跳过行业资讯结果
+            if 'industry' in json_file.name:
+                continue
+                
+            try:
+                with open(json_file, 'r') as f:
+                    data = json.load(f)
+                    company = data.get('company')
+                    items = data.get('items', [])
+                    if company:
+                        company_key = canonical_company_key(company)
+                        parsed_items = [ContentItem(**item) for item in items]
+                        results[company_key] = sanitizer.sanitize_company_items(company_key, parsed_items)
+                        print(f"  ✓ {company_display_name(company_key)}: {len(results[company_key])} 条")
+            except Exception as e:
+                print(f"  ✗ Error loading {json_file}: {e}")
+        
         return results
-    
-    # 查找所有 JSON 文件（包括子目录）
-    json_files = list(artifacts_dir.glob('**/*_result.json'))
-    print(f"  找到 {len(json_files)} 个结果文件")
-    
-    for json_file in json_files:
-        # 跳过行业资讯结果
-        if 'industry' in json_file.name:
-            continue
-            
-        try:
-            with open(json_file, 'r') as f:
-                data = json.load(f)
-                company = data.get('company')
-                items = data.get('items', [])
-                if company:
-                    company_key = canonical_company_key(company)
-                    results[company_key] = normalize_company_items([ContentItem(**item) for item in items])
-                    print(f"  ✓ {company_display_name(company_key)}: {len(items)} 条")
-        except Exception as e:
-            print(f"  ✗ Error loading {json_file}: {e}")
-    
-    return results
+    finally:
+        sanitizer.close()
 
 
 def ensure_company_coverage(results, window_start, window_end, target_count=2):
@@ -86,7 +91,8 @@ def ensure_company_coverage(results, window_start, window_end, target_count=2):
             if len(items) < target_count:
                 print(f"  ↺ {company_display_name(company_key)} 当前 {len(items)} 条，尝试补足到 {target_count} 条")
                 try:
-                    refreshed_items = normalize_company_items(
+                    refreshed_items = fetcher.sanitize_company_items(
+                        company_key,
                         fetcher.fetch_company(company_key, window_start, window_end),
                         limit=target_count,
                     )

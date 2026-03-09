@@ -70,10 +70,6 @@ class HTMLRenderer:
         
         for company, company_items in items.items():
             if not company_items:
-                rows.append(f"""<tr>
-  <td class="company">{company}</td>
-  <td class="empty-state">本周未获取到符合条件的资讯</td>
-</tr>""")
                 continue
             
             for item in company_items[:2]:
@@ -88,7 +84,7 @@ class HTMLRenderer:
                 rows.append(row_html)
         
         if not rows:
-            return '<tr><td colspan="2" class="empty-state">本周暂无竞品资讯</td></tr>'
+            return ""
         
         return "\n".join(rows)
     
