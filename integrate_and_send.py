@@ -10,12 +10,36 @@ import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections import OrderedDict
 
 sys.path.insert(0, 'src')
 
 from fetchers.base import ContentItem
+from fetchers.stealth_fetcher import StealthFetcher
 from renderer import HTMLRenderer
 from email_sender import send_weekly_report
+from config.settings import COMPETITOR_SOURCES
+
+
+COMPANY_DISPLAY_NAMES = {
+    "mobvista": "Mobvista",
+}
+
+COMPANY_ALIASES = {
+    "Mobvista": "mobvista",
+}
+
+
+def canonical_company_key(company: str) -> str:
+    return COMPANY_ALIASES.get(company, company)
+
+
+def company_display_name(company_key: str) -> str:
+    return COMPANY_DISPLAY_NAMES.get(company_key, company_key)
+
+
+def normalize_company_items(items, limit=2):
+    return sorted(items, key=lambda item: (item.date or "", item.title), reverse=True)[:limit]
 
 
 def load_company_results():
@@ -42,12 +66,41 @@ def load_company_results():
                 company = data.get('company')
                 items = data.get('items', [])
                 if company:
-                    results[company] = [ContentItem(**item) for item in items]
-                    print(f"  ✓ {company}: {len(items)} 条")
+                    company_key = canonical_company_key(company)
+                    results[company_key] = normalize_company_items([ContentItem(**item) for item in items])
+                    print(f"  ✓ {company_display_name(company_key)}: {len(items)} 条")
         except Exception as e:
             print(f"  ✗ Error loading {json_file}: {e}")
     
     return results
+
+
+def ensure_company_coverage(results, window_start, window_end, target_count=2):
+    """确保最终报告中的公司顺序固定，并尽量为每家公司补足到 2 条。"""
+    ordered_results = OrderedDict()
+    fetcher = StealthFetcher()
+
+    try:
+        for company_key in COMPETITOR_SOURCES.keys():
+            items = normalize_company_items(results.get(company_key, []), limit=target_count)
+            if len(items) < target_count:
+                print(f"  ↺ {company_display_name(company_key)} 当前 {len(items)} 条，尝试补足到 {target_count} 条")
+                try:
+                    refreshed_items = normalize_company_items(
+                        fetcher.fetch_company(company_key, window_start, window_end),
+                        limit=target_count,
+                    )
+                    if refreshed_items:
+                        items = refreshed_items
+                    print(f"    → {company_display_name(company_key)} 最终 {len(items)} 条")
+                except Exception as e:
+                    print(f"    ✗ {company_display_name(company_key)} 补抓失败: {e}")
+
+            ordered_results[company_display_name(company_key)] = items
+    finally:
+        fetcher.close()
+
+    return ordered_results
 
 
 def load_industry_results():
@@ -187,6 +240,7 @@ def main():
     # 1. 加载竞品资讯
     print("\n[1/3] 加载竞品资讯...")
     competitor_results = load_company_results()
+    competitor_results = ensure_company_coverage(competitor_results, window_start, window_end, target_count=2)
     competitor_items = []
     for company, items in competitor_results.items():
         competitor_items.extend(items)

@@ -241,6 +241,42 @@ class StealthFetcher:
             source=source,
         )
 
+    def _sort_and_limit_items(self, items: List[ContentItem], limit: int = 2) -> List[ContentItem]:
+        """去重后按日期倒序排序，并限制条数。"""
+        deduped = self._dedupe_items(items, similarity_threshold=0.6)
+        return sorted(deduped, key=lambda item: (item.date or "", item.title), reverse=True)[:limit]
+
+    def _merge_unique_items(
+        self,
+        base_items: List[ContentItem],
+        extra_items: List[ContentItem],
+        limit: int = 2,
+    ) -> List[ContentItem]:
+        """合并两组内容并按标题/链接去重。"""
+        combined = []
+        seen_urls = set()
+        seen_titles = set()
+
+        for item in base_items + extra_items:
+            title_key = re.sub(r"\W+", "", (item.title or "").lower())
+            url_key = (item.url or "").split("?", 1)[0].lower()
+            if title_key and title_key in seen_titles:
+                continue
+            if url_key and url_key in seen_urls:
+                continue
+            if title_key:
+                seen_titles.add(title_key)
+            if url_key:
+                seen_urls.add(url_key)
+            combined.append(item)
+
+        return self._sort_and_limit_items(combined, limit=limit)
+
+    def _item_signature(self, item: ContentItem) -> tuple:
+        title_key = re.sub(r"\W+", "", (item.title or "").lower())
+        url_key = (item.url or "").split("?", 1)[0].lower()
+        return (title_key, url_key)
+
     def _extract_unity_sanity_config(self) -> Dict[str, str]:
         """从 Unity 官方 news 页面提取 Sanity 配置。"""
         config = {
@@ -409,6 +445,8 @@ class StealthFetcher:
         base_url = "https://investors.pubmatic.com/news-events/news-releases/"
         html = self._fetch_html_with_fallback(base_url, timeout=60)
         if not html:
+            html = self.fetch_page(base_url, timeout=60000)
+        if not html:
             print("    - PubMatic 官网列表获取失败")
             return []
 
@@ -445,63 +483,83 @@ class StealthFetcher:
             )
 
         print(f"    PubMatic 官网: {len(items)} 条")
-        return items
+        return self._sort_and_limit_items(items, limit=2)
 
-    def _fetch_company_third_party(self, company_key: str, window_start: datetime, window_end: datetime) -> List[ContentItem]:
-        """官网 7 日内为空时，使用第三方补 2 条。"""
+    def _fetch_company_third_party(
+        self,
+        company_key: str,
+        window_start: datetime,
+        window_end: datetime,
+        existing_items: List[ContentItem] = None,
+        needed_count: int = 2,
+    ) -> List[ContentItem]:
+        """使用第三方补足资讯，最多返回 needed_count 条增量结果。"""
         source_name = COMPETITOR_SOURCES[company_key]["name"]
         query_map = {
-            "TTD": '"The Trade Desk" press release advertising',
-            "Criteo": 'Criteo press release',
-            "Taboola": 'Taboola press release',
-            "Teads": 'Teads press release',
-            "AppLovin": 'AppLovin advertising press release',
-            "mobvista": 'Mobvista press release',
-            "Moloco": 'Moloco press release',
-            "BIGO Ads": '"BIGO Ads" press release',
-            "Unity": 'Unity Technologies advertising monetization',
-            "Viant Technology": '"Viant Technology" press release',
-            "Zeta Global": '"Zeta Global" press release',
-            "PubMatic": 'PubMatic press release',
-            "Magnite": 'Magnite press release',
+            "TTD": ['"The Trade Desk"', '"The Trade Desk" advertising', '"The Trade Desk" ad tech'],
+            "Criteo": ['Criteo', 'Criteo advertising', 'Criteo ad tech'],
+            "Taboola": ['Taboola', 'Taboola advertising', 'Taboola ad tech'],
+            "Teads": ['Teads', 'Teads advertising', 'Teads CTV'],
+            "AppLovin": ['AppLovin', 'AppLovin advertising', 'AppLovin ad tech'],
+            "mobvista": ['mobvista', 'Mobvista advertising', 'Mintegral mobvista'],
+            "Moloco": ['Moloco', 'Moloco advertising', 'Moloco ad tech'],
+            "BIGO Ads": ['"BIGO Ads"', 'BIGO ads advertising', 'BIGO ads'],
+            "Unity": ['Unity advertising', '"Unity" monetization', '"Unity" ad tech'],
+            "Viant Technology": ['"Viant Technology"', 'Viant advertising', 'Viant ad tech'],
+            "Zeta Global": ['"Zeta Global"', 'Zeta Global marketing', 'Zeta Global advertising'],
+            "PubMatic": ['PubMatic', 'PubMatic advertising', 'PubMatic ad tech'],
+            "Magnite": ['Magnite', 'Magnite advertising', 'Magnite CTV'],
         }
-        query = query_map.get(company_key, f'"{source_name}" press release')
-        items = self._fetch_google_news_rss(query, window_start, window_end, source_name)
+        queries = query_map.get(company_key, [f'"{source_name}"'])
+        existing_items = existing_items or []
+        existing_signatures = {self._item_signature(item) for item in existing_items}
+        collected: List[ContentItem] = []
 
-        if company_key == "Unity":
-            filtered = []
-            for item in items:
-                title_lower = item.title.lower()
-                if ('unity' in title_lower or 'nyse:u' in title_lower or 'nyse: u' in title_lower) and 'applovin' not in title_lower and 'roblox' not in title_lower:
-                    filtered.append(item)
-            items = filtered
-        else:
-            keywords_map = {
-                "TTD": ["trade desk", "ttd"],
-                "Criteo": ["criteo"],
-                "Taboola": ["taboola"],
-                "Teads": ["teads"],
-                "AppLovin": ["applovin"],
-                "mobvista": ["mobvista", "mintegral"],
-                "Moloco": ["moloco"],
-                "BIGO Ads": ["bigo"],
-                "Viant Technology": ["viant"],
-                "Zeta Global": ["zeta"],
-                "PubMatic": ["pubmatic"],
-                "Magnite": ["magnite"],
-            }
-            company_keywords = keywords_map.get(company_key, [source_name.lower()])
-            filtered = []
-            for item in items:
-                title_lower = item.title.lower()
-                if any(keyword in title_lower for keyword in company_keywords) and not self._is_not_main_subject(item.title, source_name):
-                    filtered.append(item)
-            items = filtered
+        for query in queries:
+            if len(collected) >= needed_count:
+                break
+            items = self._fetch_google_news_rss(query, window_start, window_end, source_name)
 
-        return items[:2]
+            if company_key == "Unity":
+                filtered = []
+                for item in items:
+                    title_lower = item.title.lower()
+                    if ('unity' in title_lower or 'nyse:u' in title_lower or 'nyse: u' in title_lower) and 'applovin' not in title_lower and 'roblox' not in title_lower:
+                        filtered.append(item)
+                items = filtered
+            else:
+                keywords_map = {
+                    "TTD": ["trade desk", "ttd"],
+                    "Criteo": ["criteo"],
+                    "Taboola": ["taboola"],
+                    "Teads": ["teads"],
+                    "AppLovin": ["applovin"],
+                    "mobvista": ["mobvista", "mintegral"],
+                    "Moloco": ["moloco"],
+                    "BIGO Ads": ["bigo"],
+                    "Viant Technology": ["viant"],
+                    "Zeta Global": ["zeta"],
+                    "PubMatic": ["pubmatic"],
+                    "Magnite": ["magnite"],
+                }
+                company_keywords = keywords_map.get(company_key, [source_name.lower()])
+                filtered = []
+                for item in items:
+                    title_lower = item.title.lower()
+                    if any(keyword in title_lower for keyword in company_keywords) and not self._is_not_main_subject(item.title, source_name):
+                        filtered.append(item)
+                items = filtered
+
+            filtered_new_items = [
+                item for item in items
+                if self._item_signature(item) not in existing_signatures
+            ]
+            collected = self._merge_unique_items(collected, filtered_new_items, limit=needed_count)
+
+        return self._sort_and_limit_items(collected, limit=needed_count)
 
     def fetch_company(self, company_key: str, window_start: datetime, window_end: datetime) -> List[ContentItem]:
-        """统一竞品抓取入口：官网优先，官网为空才补第三方 2 条。"""
+        """统一竞品抓取入口：官网优先，最终每家公司最多保留 2 条。"""
         official_fetchers = {
             "TTD": self.fetch_ttd,
             "Criteo": self.fetch_criteo,
@@ -520,14 +578,25 @@ class StealthFetcher:
 
         fetcher = official_fetchers.get(company_key)
         if not fetcher:
-            return self.fetch_generic(company_key, window_start, window_end)
+            return self._sort_and_limit_items(self.fetch_generic(company_key, window_start, window_end), limit=2)
 
-        official_items = fetcher(window_start, window_end)
-        if official_items:
+        official_items = self._sort_and_limit_items(fetcher(window_start, window_end), limit=2)
+        if len(official_items) >= 2:
             return official_items
 
-        print("    官网 7 日内无内容，使用第三方补 2 条")
-        return self._fetch_company_third_party(company_key, window_start, window_end)
+        if official_items:
+            print(f"    官网仅 {len(official_items)} 条，使用第三方补足到 2 条")
+        else:
+            print("    官网 7 日内无内容，使用第三方补 2 条")
+
+        third_party_items = self._fetch_company_third_party(
+            company_key,
+            window_start,
+            window_end,
+            existing_items=official_items,
+            needed_count=2 - len(official_items),
+        )
+        return self._merge_unique_items(official_items, third_party_items, limit=2)
     
     def fetch_criteo(self, window_start: datetime, window_end: datetime) -> List[ContentItem]:
         """抓取 Criteo - 使用官网新闻列表"""

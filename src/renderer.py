@@ -70,9 +70,13 @@ class HTMLRenderer:
         
         for company, company_items in items.items():
             if not company_items:
+                rows.append(f"""<tr>
+  <td class="company">{company}</td>
+  <td class="empty-state">本周未获取到符合条件的资讯</td>
+</tr>""")
                 continue
             
-            for item in company_items:
+            for item in company_items[:2]:
                 row_html = f"""<tr>
   <td class="company">{company}</td>
   <td>
