@@ -17,6 +17,8 @@ from config.settings import OUTPUT_CONFIG
 
 class HTMLRenderer:
     """HTML 渲染器"""
+
+    REPORT_COVER_URL = "https://wmwm1ok.github.io/programmatic-news-weekly/assets/programmatic-news-cover.jpg"
     
     def __init__(self, template_path: str = None):
         self.template_path = template_path or os.path.join(
@@ -48,6 +50,11 @@ class HTMLRenderer:
         html = html.replace("{{START_DATE}}", start_date)
         html = html.replace("{{END_DATE}}", end_date)
         html = html.replace("{{GENERATED_AT}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        report_title = f"程序化广告竞品周报 {start_date} ~ {end_date}"
+        report_description = "程序化广告竞品与行业资讯周报，涵盖 13 家竞品与行业资讯汇总。"
+        html = html.replace("{{REPORT_TITLE}}", report_title)
+        html = html.replace("{{REPORT_DESCRIPTION}}", report_description)
+        html = html.replace("{{REPORT_COVER_URL}}", self.REPORT_COVER_URL)
         
         # 填充竞品资讯
         competitor_html = self._render_competitor_section(competitor_items)

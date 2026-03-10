@@ -1,0 +1,104 @@
+name: Push Weekly Report To Ruliu Enterprise Robot
+
+on:
+  schedule:
+    - cron: '30 1 * * 1'
+  workflow_dispatch:
+    inputs:
+      run_date:
+        description: 'Optional run date in YYYY-MM-DD, defaults to today in Asia/Shanghai'
+        required: false
+        type: string
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send weekly report link
+        env:
+          RULIU_CORPID: ${{ secrets.RULIU_CORPID }}
+          RULIU_CORPSECRET: ${{ secrets.RULIU_CORPSECRET }}
+          RULIU_AGENTID: ${{ secrets.RULIU_AGENTID }}
+          RULIU_GROUP_ID: ${{ secrets.RULIU_GROUP_ID }}
+          RULIU_CARD_LINK_URL: ${{ secrets.RULIU_CARD_LINK_URL }}
+          RUN_DATE_INPUT: ${{ github.event.inputs.run_date }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          tz = timezone(timedelta(hours=8))
+          run_date_input = os.environ.get("RUN_DATE_INPUT", "").strip()
+          if run_date_input:
+              run_date = datetime.strptime(run_date_input, "%Y-%m-%d").date()
+          else:
+              run_date = datetime.now(tz).date()
+
+          start_date = run_date - timedelta(days=7)
+          title = f"程序化广告竞品周报{start_date.strftime('%m%d')}-{run_date.strftime('%m%d')}"
+
+          corpid = os.environ["RULIU_CORPID"]
+          corpsecret = os.environ["RULIU_CORPSECRET"]
+          agentid = int(os.environ["RULIU_AGENTID"])
+          group_id = int(os.environ["RULIU_GROUP_ID"])
+          page_url = os.environ["RULIU_CARD_LINK_URL"]
+
+          token_url = (
+              "https://qy.im.baidu.com/api/gettoken?"
+              + urllib.parse.urlencode(
+                  {"corpid": corpid, "corpsecret": corpsecret}
+              )
+          )
+          with urllib.request.urlopen(token_url, timeout=20) as resp:
+              token_payload = json.loads(resp.read().decode("utf-8"))
+
+          if "access_token" not in token_payload:
+              raise SystemExit(f"Failed to fetch access token: {token_payload}")
+
+          send_url = (
+              "https://api.im.baidu.com/api/msg/groupmsgsend?"
+              + urllib.parse.urlencode({"access_token": token_payload["access_token"]})
+          )
+
+          payload = {
+              "agentid": agentid,
+              "message": {
+                  "header": {
+                      "toid": group_id,
+                      "totype": "GROUP",
+                      "msgtype": "TEXT",
+                      "clientmsgid": int(datetime.now(tz).timestamp() * 1000),
+                      "role": "robot",
+                  },
+                  "body": [
+                      {
+                          "type": "LINK",
+                          "href": page_url,
+                          "label": title,
+                      }
+                  ],
+              },
+          }
+
+          request = urllib.request.Request(
+              send_url,
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json; charset=utf-8"},
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as resp:
+              response_payload = json.loads(resp.read().decode("utf-8"))
+
+          print(response_payload)
+          status_code = response_payload.get("error_code")
+          if status_code is None:
+              status_code = response_payload.get("errcode")
+          if status_code is None:
+              status_code = response_payload.get("code", 0)
+          if status_code not in (0, "0", 200, "200"):
+              raise SystemExit(f"Ruliu send failed: {response_payload}")
+          PY
