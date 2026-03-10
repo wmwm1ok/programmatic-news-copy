@@ -1,8 +1,6 @@
 name: Push Weekly Report To Ruliu Enterprise Robot
 
 on:
-  schedule:
-    - cron: '30 1 * * 1'
   workflow_dispatch:
     inputs:
       run_date:
@@ -12,7 +10,7 @@ on:
 
 jobs:
   push:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Send weekly report link
